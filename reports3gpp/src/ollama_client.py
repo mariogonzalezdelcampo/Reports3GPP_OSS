@@ -24,13 +24,14 @@ from typing import Any
 __all__ = ["query_ollama"]
 
 
-def query_ollama(host: str, model: str, prompt: str) -> str:
+def query_ollama(host: str, model: str, prompt: str, temperature: float = 0.0) -> str:
     """Send a prompt to an Ollama server and return the generated response.
 
     Args:
         host: Base URL of the Ollama server (e.g. ``http://10.95.118.26``).
         model: The model name to use (e.g. ``gpt-oss:120b``).
         prompt: The prompt string to send.
+        temperature: Sampling temperature for the model (default 0.0).
 
     Returns:
         The generated text response from the model.
@@ -39,6 +40,7 @@ def query_ollama(host: str, model: str, prompt: str) -> str:
     payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
+        "temperature": temperature,
     }
     # Ollama returns a JSON object with a ``response`` field containing the text.
     resp = requests.post(url, json=payload, stream=True)

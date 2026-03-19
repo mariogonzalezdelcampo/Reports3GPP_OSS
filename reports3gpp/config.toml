@@ -4,6 +4,10 @@
 meeting_number = 165
 
 # Directory where documents will be downloaded and processed
+# Directory where documents will be downloaded and processed (relative to workspace root).
+# Directory where documents will be downloaded and processed (relative to workspace root).
+# Directory where documents will be downloaded and processed (relative to the
+# ``reports3gpp`` package directory).
 documents_dir = "./documents"
 
 # Temporary directory for downloads
@@ -12,3 +16,20 @@ temp_dir = "./temp"
 # Processing mode: FULL runs the whole pipeline, BYPASS skips to LLM only.
 # Default is BYPASS as requested.
 processing_mode = "BYPASS"
+# Fixed prompt text used for LLM summarisation. Modify this value to change the prompt without editing code.
+fixed_prompt = """
+Eres un modelo experto en análisis documental con conocimientos profundos en el area de charging.
+
+Tu tarea es crear un resumen claro y ejecutivo ejecutivo, sin interpretación subjetiva, sin añadir información inexistente y manteniendo el sentido original del documento.
+
+REQUISITOS DEL RESUMEN:
+- Incluye claramente la especificacion o report que se ve impactada (numero y nombre)
+- Estructura clara.
+- Sin opiniones ni reformulaciones creativas.
+- Incluye: ideas clave, datos relevantes, conclusiones del autor.
+- **No incluyas detalles de secciones como Foreword, Scope, References, Definition of terms, Change history, Versioning, Modal-Verb Conventions, Definitions, Symbols, Abbreviations**.
+- No incluyas el texto de entrada, solo el resumen del contenido.
+
+A continuación te proporciono el contenido del documento. RESPONDE SOLO CON EL RESUMEN en ingles en formato markdown utilizando la misma terminología utilizada en el documento.
+
+=== DOCUMENTO ====\n"""
