@@ -1,0 +1,14 @@
+# Configuration file for 3GPP report generator
+
+# Meeting number to process (e.g., 165)
+meeting_number = 165
+
+# Directory where documents will be downloaded and processed
+documents_dir = "./documents"
+
+# Temporary directory for downloads
+temp_dir = "./temp"
+
+# Processing mode: FULL runs the whole pipeline, BYPASS skips to LLM only.
+# Default is BYPASS as requested.
+processing_mode = "BYPASS"
