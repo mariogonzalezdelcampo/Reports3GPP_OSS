@@ -5,6 +5,7 @@ import os
 import sys
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +13,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import AppConfig
-from downloader import download_file, download_zip_ftp
+from downloader import download_file, download_zip_ftp, download_zip
 from extractor import extract_zip
 from excel_processor import excel_to_csv, filter_items
 from tdoc_handler import process_tdoc
@@ -20,6 +21,79 @@ from summary import append_summary
 from html_parser import find_zip_file_in_html
 from ollama_client import query_ollama
 from docx import Document
+
+# ---------------------------------------------------------------------------
+# Helper to download and extract the "Charging exec report" ZIP referenced in the
+# Excel file. This is used both in BYPASS and FULL processing modes.
+# ---------------------------------------------------------------------------
+def _extract_charging_report(excel_file: Path, cfg) -> None:
+    """Locate the row with Title "Charging exec report" and extract its ZIP.
+
+    The function reads the Excel file with ``openpyxl`` (read‑only mode) to find
+    the column indices for ``Title`` and ``TDoc`` (case‑insensitive). When the
+    matching row is found, the URL from the ``TDoc`` column is downloaded –
+    supporting both FTP and HTTP – and extracted into the ``summaries``
+    directory of the meeting. Errors are logged but do not raise, so the main
+    pipeline can continue.
+    """
+    try:
+        from openpyxl import load_workbook
+
+        # Load workbook in normal mode to access hyperlinks.
+        wb = load_workbook(excel_file, read_only=False, data_only=True)
+        ws = wb.active
+        header = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        title_idx = None
+        tdoc_idx = None
+        for i, col_name in enumerate(header):
+            if isinstance(col_name, str):
+                lowered = col_name.lower()
+                if lowered == "title":
+                    title_idx = i
+                elif lowered == "tdoc":
+                    tdoc_idx = i
+        if title_idx is None or tdoc_idx is None:
+            logger.warning("Title or TDoc column not found in Excel; skipping charging report extraction")
+            wb.close()
+            return
+
+        # The summaries directory should be inside the meeting folder, not one level up.
+        # ``excel_file.parent`` is the meeting directory (e.g., ``.../3GPP_meeting_docs_165``).
+        summaries_dir = excel_file.parent / "summaries"
+        summaries_dir.mkdir(exist_ok=True)
+
+        for row in ws.iter_rows(min_row=2):
+            title_cell = row[title_idx]
+            if title_cell.value and str(title_cell.value).strip() == "Charging exec report":
+                tdoc_cell = row[tdoc_idx]
+                zip_url = None
+                if tdoc_cell.hyperlink:
+                    zip_url = tdoc_cell.hyperlink.target
+                elif tdoc_cell.value:
+                    zip_url = str(tdoc_cell.value).strip()
+                if not zip_url:
+                    logger.warning("Charging exec report row has no TDoc URL")
+                    break
+                # Ensure temporary directory exists.
+                cfg.temp_dir.mkdir(parents=True, exist_ok=True)
+                if zip_url.startswith("ftp://"):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(zip_url)
+                    host = parsed.hostname
+                    path = parsed.path
+                    temp_zip = cfg.temp_dir / f"temp_{os.path.basename(path)}"
+                    download_zip_ftp(host, path, temp_zip)
+                    extract_zip(temp_zip, summaries_dir)
+                    temp_zip.unlink()
+                else:
+                    zip_path = download_zip(zip_url, cfg.temp_dir)
+                    extract_zip(zip_path, summaries_dir)
+                    zip_path.unlink()
+                logger.info("Extracted Charging exec report into %s", summaries_dir)
+                break
+        wb.close()
+    except Exception as e:
+        logger.error("Failed to extract Charging exec report: %s", e)
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -93,6 +167,46 @@ def _extract_docx_text(docx_path: Path) -> str:
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
+# Helper to summarise all DOCX files in a folder and write a single .md file.
+# ---------------------------------------------------------------------------
+def _summarise_folder(folder_path: Path, cfg) -> None:
+    """Summarise every DOCX in *folder_path* and write a .md named after the folder.
+
+    The output file ``<folder_name>.md`` will contain, for each DOCX, the file name
+    followed by its summary. The prompt used is taken from ``cfg.fixed_prompt``.
+    """
+    docx_files = sorted(folder_path.glob("*.docx"))
+    if not docx_files:
+        logger.info("No DOCX files found in %s", folder_path)
+        return
+
+    summary_path = folder_path / f"{folder_path.name}.md"
+    with open(summary_path, "w", encoding="utf-8") as summary_file:
+            for docx_file in docx_files:
+                logger.info(f"Processing DOCX file: {docx_file.name}")
+                raw_text = _extract_docx_text(docx_file)
+                cleaned = _clean_text(raw_text)
+                max_chunk = 200000
+                chunks = [cleaned[i : i + max_chunk] for i in range(0, len(cleaned), max_chunk)]
+                fixed_prompt = cfg.fixed_prompt or ""
+                summary_parts = []
+                for chunk in chunks:
+                    prompt_chunk = fixed_prompt + chunk + "\n=== FIN DOCUMENTO ==="
+                    chunk_resp = query_ollama(
+                        "http://10.95.118.26:11434",
+                        "gpt-oss:120b",
+                        prompt_chunk,
+                        temperature=0.1,
+                    )
+                    summary_parts.append(chunk_resp.strip())
+                # Write filename as a highlighted markdown heading and its summary
+                # Using a level‑2 heading with bold for clear separation
+                summary_file.write(f"## **{docx_file.name}**\n\n")
+                summary_file.write("\n\n".join(summary_parts))
+                summary_file.write("\n\n")
+    logger.info(f"Summary written to {summary_path}")
+
+# ---------------------------------------------------------------------------
 # Main workflow
 # ---------------------------------------------------------------------------
 def main(meeting_number: Optional[int] = None) -> None:
@@ -116,40 +230,34 @@ def main(meeting_number: Optional[int] = None) -> None:
         logger.info(f"Response: {response}")
 
         # ---------------------------------------------------------------
-        # Summarise the first DOCX in the FS_6G_CH folder (if it exists)
+        # Summarise all DOCX files in each sub‑folder of the meeting directory
         # ---------------------------------------------------------------
         meeting_dir = cfg.documents_dir / f"3GPP_meeting_docs_{cfg.meeting_number}"
-        fs_folder = meeting_dir / "FS_6G_CH"
-        if fs_folder.is_dir():
-            docx_files = sorted(fs_folder.glob("*.docx"))
-            if docx_files:
-                first_docx = docx_files[0]
-                logger.info(f"Processing DOCX file: {first_docx.name}")
-                raw_text = _extract_docx_text(first_docx)
-                cleaned = _clean_text(raw_text)
-                # Split into manageable chunks (≈200000 characters, ~50000 tokens)
-                max_chunk = 200000
+        # Use the module‑level helper defined earlier (requires cfg argument)
+        for sub_folder in meeting_dir.iterdir():
+            if sub_folder.is_dir():
+                _summarise_folder(sub_folder, cfg)
 
-                chunks = [cleaned[i : i + max_chunk] for i in range(0, len(cleaned), max_chunk)]
-                # Use the configurable fixed prompt from the configuration file.
-                fixed_prompt = cfg.fixed_prompt or ""
-                summary_parts = []
-                for chunk in chunks:
-                    prompt_chunk = fixed_prompt + chunk + "\n=== FIN DOCUMENTO ==="
-                    chunk_resp = query_ollama("http://10.95.118.26:11434", "gpt-oss:120b", prompt_chunk, temperature=0.1)
-                    summary_parts.append(chunk_resp.strip())
-                    # Log each chunk interaction (append mode)
-                    # Interaction logging removed as per user request
-                # Include the DOCX filename at the top of the summary file
-                final_summary = f"{first_docx.name}\n\n" + "\n\n".join(summary_parts)
-                summary_path = fs_folder / "FS_6G_CH_summary.md"
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    f.write(final_summary)
-                logger.info(f"Summary written to {summary_path}")
-            else:
-                logger.info("No DOCX files found in %s", fs_folder)
+        # After all summaries are generated, move the .md files to a top‑level
+        # ``summaries`` directory (created if it does not exist).
+        summaries_dir = meeting_dir / "summaries"
+        summaries_dir.mkdir(exist_ok=True)
+        for sub_folder in meeting_dir.iterdir():
+            if sub_folder.is_dir():
+                md_file = sub_folder / f"{sub_folder.name}.md"
+                if md_file.is_file():
+                    shutil.move(str(md_file), str(summaries_dir / md_file.name))
+
+        # -----------------------------------------------------------------
+        # In BYPASS mode we still want to extract the Charging exec report.
+        # Locate the Excel file (if any) inside the meeting directory and
+        # invoke the helper. If the file is missing we simply skip extraction.
+        # -----------------------------------------------------------------
+        excel_file = next(meeting_dir.rglob("*.xls*"), None)
+        if excel_file and excel_file.is_file():
+            _extract_charging_report(excel_file, cfg)
         else:
-            logger.info("FS_6G_CH folder not present: %s", fs_folder)
+            logger.info("No Excel file found in BYPASS mode – skipping Charging exec report extraction")
         return
 
     # -----------------------------------------------------------------------
@@ -212,6 +320,83 @@ def main(meeting_number: Optional[int] = None) -> None:
             continue
 
     logger.info("Report generation completed successfully")
+
+    # After the full pipeline, summarise DOCX files in each sub‑folder of the meeting directory.
+    # The meeting_dir variable already points to the extracted meeting folder.
+    for sub_folder in meeting_dir.iterdir():
+        if sub_folder.is_dir():
+            _summarise_folder(sub_folder, cfg)
+
+    # Move generated markdown summaries to a top‑level ``summaries`` folder.
+    summaries_dir = meeting_dir / "summaries"
+    summaries_dir.mkdir(exist_ok=True)
+    for sub_folder in meeting_dir.iterdir():
+        if sub_folder.is_dir():
+            md_file = sub_folder / f"{sub_folder.name}.md"
+            if md_file.is_file():
+                shutil.move(str(md_file), str(summaries_dir / md_file.name))
+
+        # Extract the Charging exec report after all other processing.
+        _extract_charging_report(excel_file, cfg)
+    # -----------------------------------------------------------------
+    # Additional step: download the ZIP referenced by the Excel row whose
+    # ``Title`` column equals "Charging exec report" and extract its contents
+    # (expected to be a .ppt or .pptx) into the ``summaries`` directory.
+    # -----------------------------------------------------------------
+    try:
+        # ``excel_file`` was defined earlier in the FULL pipeline section.
+        # Re‑use it here; if it does not exist (e.g., BYPASS mode) we simply
+        # skip this step.
+        if excel_file and excel_file.is_file():
+            from openpyxl import load_workbook
+
+            wb = load_workbook(excel_file, read_only=False, data_only=True)
+            ws = wb.active
+            # Identify column indices for Title and TDoc (case‑insensitive).
+            header = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+            title_idx = None
+            tdoc_idx = None
+            for i, col_name in enumerate(header):
+                if isinstance(col_name, str):
+                    lowered = col_name.lower()
+                    if lowered == "title":
+                        title_idx = i
+                    elif lowered == "tdoc":
+                        tdoc_idx = i
+            if title_idx is not None and tdoc_idx is not None:
+                for row in ws.iter_rows(min_row=2):
+                    title_cell = row[title_idx]
+                    if title_cell.value and str(title_cell.value).strip() == "Charging exec report":
+                        tdoc_cell = row[tdoc_idx]
+                        # Prefer hyperlink target if present, otherwise the cell value.
+                        zip_url = None
+                        if tdoc_cell.hyperlink:
+                            zip_url = tdoc_cell.hyperlink.target
+                        elif tdoc_cell.value:
+                            zip_url = str(tdoc_cell.value).strip()
+                        if zip_url:
+                            # Ensure temporary directory exists.
+                            cfg.temp_dir.mkdir(parents=True, exist_ok=True)
+                            # Determine download method based on scheme.
+                            if zip_url.startswith("ftp://"):
+                                from urllib.parse import urlparse
+                                parsed = urlparse(zip_url)
+                                host = parsed.hostname
+                                path = parsed.path
+                                temp_zip = cfg.temp_dir / f"temp_{os.path.basename(path)}"
+                                download_zip_ftp(host, path, temp_zip)
+                                extract_zip(temp_zip, summaries_dir)
+                                temp_zip.unlink()
+                            else:
+                                zip_path = download_zip(zip_url, cfg.temp_dir)
+                                extract_zip(zip_path, summaries_dir)
+                                zip_path.unlink()
+                            logger.info("Extracted Charging exec report into %s", summaries_dir)
+                        break  # Found the row, no need to continue.
+            wb.close()
+    except Exception as e:
+        # Log the error but do not fail the whole pipeline.
+        logger.error("Failed to download or extract Charging exec report: %s", e)
 
     # -----------------------------------------------------------------------
     # OPTIONAL: final LLM call after the full pipeline (mirrors BYPASS behaviour)

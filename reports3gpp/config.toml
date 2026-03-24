@@ -18,18 +18,48 @@ temp_dir = "./temp"
 processing_mode = "BYPASS"
 # Fixed prompt text used for LLM summarisation. Modify this value to change the prompt without editing code.
 fixed_prompt = """
-Eres un modelo experto en análisis documental con conocimientos profundos en el area de charging.
+Eres un experto en documentación técnica de 3GPP (SA5), familiarizado con CRs, pCRs y TR/TS.
 
-Tu tarea es crear un resumen claro y ejecutivo ejecutivo, sin interpretación subjetiva, sin añadir información inexistente y manteniendo el sentido original del documento.
+Tu tarea es resumir el documento completo cuyo texto se proporciona a continuación.
 
-REQUISITOS DEL RESUMEN:
-- Incluye claramente la especificacion o report que se ve impactada (numero y nombre)
-- Estructura clara.
-- Sin opiniones ni reformulaciones creativas.
-- Incluye: ideas clave, datos relevantes, conclusiones del autor.
+INSTRUCCIONES GENERALES:
+1. Produce un resumen claro, conciso y estructurado.
+2. Identifica automáticamente si el documento:
+   a) ES un Change Request (CR, pCR, pseudo‑CR), o
+   b) ES un documento técnico completo (con propuesta detallada).
+3. Según el tipo, sigue las instrucciones:
+
+INSTRUCCIONES SI ES UN CR / pCR / pseudo‑CR:
+- Indica explícitamente:
+  • Qué especificación o TR/TS se modifica (ej.: “Modifica TR 32.872”).  
+  • El propósito principal del cambio.  
+  • Una síntesis clara de los cambios propuestos.  
+  • A qué apartado(s) de la especificación afectan.  
+- Mantén la precisión técnica pero evitando excesivo detalle textual.
+
+INSTRUCCIONES SI ES UN DOCUMENTO COMPLETO:
+- Resume:
+  • El propósito general del documento.  
+  • Los temas técnicos principales.  
+  • Las propuestas, requisitos o arquitectura introducida.  
+  • Los casos de uso relevantes si existen.
+
+INSTRUCCIONES PARA AMBOS CASOS:
+- No inventes información ausente en el texto.  
+- Si el documento incluye secciones marcadas como “First Change”, “End of Changes”, “Modified Section”, etc., descríbelas de forma conceptual.  
+- Si se citan Work Items, vincúlalos si aportan contexto.
 - **No incluyas detalles de secciones como Foreword, Scope, References, Definition of terms, Change history, Versioning, Modal-Verb Conventions, Definitions, Symbols, Abbreviations**.
 - No incluyas el texto de entrada, solo el resumen del contenido.
+- No incluyas ninguna aclaracion diciendo que es el final del resumen, solo el resumen en si.
+- RESPONDE SOLO CON EL RESUMEN en ingles en formato markdown utilizando la misma terminología utilizada en el documento.
 
-A continuación te proporciono el contenido del documento. RESPONDE SOLO CON EL RESUMEN en ingles en formato markdown utilizando la misma terminología utilizada en el documento.
+FORMATO DE SALIDA:
+1. Tipo de documento: CR / pCR / pseudo‑CR / Documento completo  
+2. Especificación afectada (si aplica)  
+3. Resumen ejecutivo  
+4. Cambios o contenido técnico clave  
+5. Impacto o justificación técnica  
+
+A continuación tienes el texto del documento para analizar:
 
 === DOCUMENTO ====\n"""
